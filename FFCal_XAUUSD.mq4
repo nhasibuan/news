@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
 //|  FFCal_XAUUSD.mq4                                                |
 //|  Forex Factory Calendar News Trader for XAU/USD                  |
-//|  Source : https://nfs.faireconomy.media/ff_calendar_thisweek.json |
+//|  Source : https://nfs.faireconomy.media/ff_calendar_thisweek.csv  |
 //|  Repo   : https://github.com/nhasibuan/news                      |
 //+------------------------------------------------------------------+
 #property copyright   "Delima"
-#property version     "1.00"
+#property version     "1.10"
 #property strict
 #property indicator_chart_window
 
 //--- Inputs
-input string   InpCalURL        = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
+input string   InpCalURL        = "https://nfs.faireconomy.media/ff_calendar_thisweek.csv";
 input int      InpMinsBefore    = 5;       // Minutes before event to open order
 input int      InpMinsAfter     = 15;      // Minutes after event to force-close
 input double   InpLotSize       = 0.01;    // Order lot size
@@ -25,7 +25,18 @@ input color    InpColorInfo     = clrWhite;
 //--- Constants
 #define MAX_EVENTS  60
 #define LBL_PREFIX  "FFCal_"
-#define CAL_URL     "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+// CSV column indices (0-based)
+// Title,Country,Date,Time,Impact,Forecast,Previous,URL
+#define COL_TITLE    0
+#define COL_COUNTRY  1
+#define COL_DATE     2
+#define COL_TIME     3
+#define COL_IMPACT   4
+#define COL_FORECAST 5
+#define COL_PREVIOUS 6
+#define COL_URL      7
+#define COL_COUNT    8
 
 //--- Event data store (parallel arrays)
 string   evTitle    [MAX_EVENTS];
@@ -34,6 +45,7 @@ datetime evTime     [MAX_EVENTS];
 string   evImpact   [MAX_EVENTS];
 string   evForecast [MAX_EVENTS];
 string   evPrevious [MAX_EVENTS];
+string   evURL      [MAX_EVENTS];
 int      evBias     [MAX_EVENTS]; // +1 bullish gold | -1 bearish gold | 0 neutral
 bool     evTraded   [MAX_EVENTS];
 int      evCount    = 0;
@@ -45,7 +57,7 @@ string   g_lblPrefix = "";
 int OnInit()
 {
    g_lblPrefix = LBL_PREFIX + (string)((int)TimeCurrent()) + "_";
-   Print("FFCal_XAUUSD v1.00 | Magic=", InpMagic, " | Symbol=", Symbol());
+   Print("FFCal_XAUUSD v1.10 | Magic=", InpMagic, " | Symbol=", Symbol());
    FetchAndParseCalendar();
    return INIT_SUCCEEDED;
 }
@@ -77,7 +89,7 @@ int OnCalculate(const int rates_total,
 }
 
 //+------------------------------------------------------------------+
-//| Fetch JSON calendar via WebRequest                               |
+//| Fetch CSV calendar via WebRequest                                |
 //+------------------------------------------------------------------+
 void FetchAndParseCalendar()
 {
@@ -100,46 +112,63 @@ void FetchAndParseCalendar()
       return;
    }
 
-   //--- FIX: assign CharArrayToString result to a named variable
-   //    before passing into ParseJSON(const string &json)
-   //    MQL4 strict does not allow temporaries as const-ref arguments
-   string json = CharArrayToString(result);
-   g_lastFetch  = TimeCurrent();
-   ParseJSON(json);
-   Print("FFCal | Loaded ", evCount, " Medium/High events.");
+   string csv = CharArrayToString(result);
+   g_lastFetch = TimeCurrent();
+   ParseCSV(csv);
+   Print("FFCal | Loaded ", evCount, " Medium/High events from CSV.");
 }
 
 //+------------------------------------------------------------------+
-//| Lightweight brace-bounded JSON object parser                     |
+//| CSV line-by-line parser                                          |
+//| Format: Title,Country,Date,Time,Impact,Forecast,Previous,URL     |
+//| Date  : MM-DD-YYYY   Time: 12h am/pm  e.g. "12:30pm"            |
 //+------------------------------------------------------------------+
-void ParseJSON(const string &json)
+void ParseCSV(string csv)
 {
    evCount = 0;
-   int pos     = 0;
-   int jsonLen = StringLen(json);
 
-   while (pos < jsonLen && evCount < MAX_EVENTS)
+   // Normalise line endings
+   StringReplace(csv, "\r\n", "\n");
+   StringReplace(csv, "\r",   "\n");
+
+   int pos    = 0;
+   int csvLen = StringLen(csv);
+   bool firstLine = true;   // skip header row
+
+   while (pos < csvLen && evCount < MAX_EVENTS)
    {
-      int s = StringFind(json, "{", pos);  if (s < 0) break;
-      int e = StringFind(json, "}", s);    if (e < 0) break;
-      pos = e + 1;
+      // Find end of line
+      int eol = StringFind(csv, "\n", pos);
+      if (eol < 0) eol = csvLen;
 
-      string obj     = StringSubstr(json, s, e - s + 1);
-      string impact  = ExtractField(obj, "impact");
-      string country = ExtractField(obj, "country");
+      string line = StringSubstr(csv, pos, eol - pos);
+      pos = eol + 1;
+
+      if (StringLen(line) < 5) continue;
+
+      // Skip header
+      if (firstLine) { firstLine = false; continue; }
+
+      // Split line into 8 fields by comma
+      string fields[COL_COUNT];
+      if (!SplitCSVLine(line, fields)) continue;
+
+      string impact  = fields[COL_IMPACT];
+      string country = fields[COL_COUNTRY];
 
       if (impact != "Medium" && impact != "High") continue;
 
       evImpact   [evCount] = impact;
       evCountry  [evCount] = country;
-      evTitle    [evCount] = ExtractField(obj, "title");
-      evForecast [evCount] = ExtractField(obj, "forecast");
-      evPrevious [evCount] = ExtractField(obj, "previous");
+      evTitle    [evCount] = fields[COL_TITLE];
+      evForecast [evCount] = fields[COL_FORECAST];
+      evPrevious [evCount] = fields[COL_PREVIOUS];
+      evURL      [evCount] = fields[COL_URL];
 
-      //--- FIX: assign ExtractField result to a named variable
-      //    before passing into ParseFFDate(const string &raw)
-      string dateStr      = ExtractField(obj, "date");
-      evTime [evCount]    = ParseFFDate(dateStr);
+      // Parse date + time to broker datetime
+      string dateStr = fields[COL_DATE];  // MM-DD-YYYY
+      string timeStr = fields[COL_TIME];  // e.g. "12:30pm"
+      evTime[evCount] = ParseCSVDateTime(dateStr, timeStr);
 
       evBias   [evCount] = CalcBias(country, evTitle[evCount],
                                     evForecast[evCount], evPrevious[evCount]);
@@ -149,48 +178,63 @@ void ParseJSON(const string &json)
 }
 
 //+------------------------------------------------------------------+
-//| Extract value for a JSON string field by key                     |
+//| Split one CSV line into exactly COL_COUNT fields                 |
+//| Returns false if field count does not match                      |
 //+------------------------------------------------------------------+
-string ExtractField(const string &obj, const string key)
+bool SplitCSVLine(const string line, string &fields[])
 {
-   string needle = "\"" + key + "\":\"";
-   int    s      = StringFind(obj, needle);
-   if (s < 0) return "";
-   s += StringLen(needle);
-   int e = StringFind(obj, "\"", s);
-   if (e < 0) return "";
-   return StringSubstr(obj, s, e - s);
+   int f   = 0;
+   int pos = 0;
+   int len = StringLen(line);
+
+   while (pos <= len && f < COL_COUNT)
+   {
+      int comma = StringFind(line, ",", pos);
+      if (comma < 0) comma = len;
+
+      fields[f] = StringSubstr(line, pos, comma - pos);
+      // Trim leading/trailing spaces
+      StringTrimLeft(fields[f]);
+      StringTrimRight(fields[f]);
+
+      pos = comma + 1;
+      f++;
+   }
+   return (f == COL_COUNT);
 }
 
 //+------------------------------------------------------------------+
-//| Convert FF ISO-8601 datetime string to broker-local datetime     |
+//| Parse FF CSV date (MM-DD-YYYY) + time (h:mmam/pm) to datetime   |
+//| All FF CSV times are New York time (UTC-4 EDT / UTC-5 EST)       |
 //+------------------------------------------------------------------+
-datetime ParseFFDate(const string &raw)
+datetime ParseCSVDateTime(const string dateStr, const string timeStr)
 {
-   if (StringLen(raw) < 19) return 0;
+   // dateStr: MM-DD-YYYY
+   if (StringLen(dateStr) < 10) return 0;
+   int mo = (int)StringSubstr(dateStr, 0, 2);
+   int dy = (int)StringSubstr(dateStr, 3, 2);
+   int yr = (int)StringSubstr(dateStr, 6, 4);
+
+   // timeStr examples: "12:30pm", "8:30am", "1:45pm"
+   int colonPos = StringFind(timeStr, ":");
+   if (colonPos < 0) return 0;
+
+   int hr  = (int)StringSubstr(timeStr, 0, colonPos);
+   int mn  = (int)StringSubstr(timeStr, colonPos + 1, 2);
+
+   string suffix = StringSubstr(timeStr, colonPos + 3); // "am" or "pm"
+   StringToLower(suffix);
+
+   if (suffix == "pm" && hr != 12) hr += 12;
+   if (suffix == "am" && hr == 12) hr  = 0;
 
    MqlDateTime mdt;
-   mdt.year = (int)StringSubstr(raw,  0, 4);
-   mdt.mon  = (int)StringSubstr(raw,  5, 2);
-   mdt.day  = (int)StringSubstr(raw,  8, 2);
-   mdt.hour = (int)StringSubstr(raw, 11, 2);
-   mdt.min  = (int)StringSubstr(raw, 14, 2);
-   mdt.sec  = (int)StringSubstr(raw, 17, 2);
+   mdt.year = yr; mdt.mon = mo; mdt.day = dy;
+   mdt.hour = hr; mdt.min = mn; mdt.sec = 0;
 
-   int    offSign = 1;
-   int    offH    = 0;
-   int    offM    = 0;
-   string offStr  = StringSubstr(raw, 19);
-
-   if (StringLen(offStr) >= 3)
-   {
-      if (StringSubstr(offStr, 0, 1) == "-") offSign = -1;
-      offH = (int)StringSubstr(offStr, 1, 2);
-      int c = StringFind(offStr, ":");
-      if (c > 0) offM = (int)StringSubstr(offStr, c + 1, 2);
-   }
-
-   datetime utc    = StructToTime(mdt) - offSign * (offH * 3600 + offM * 60);
+   // FF CSV uses New York time: EDT = UTC-4, EST = UTC-5
+   // Use UTC-4 (EDT) as default; adjust if needed per broker offset
+   datetime utc    = StructToTime(mdt) + 4 * 3600;
    datetime broker = utc + (TimeCurrent() - TimeGMT());
    return broker;
 }
@@ -255,7 +299,7 @@ void DrawDashboard()
 
    LabelSet("hdr1",
       StringFormat("%-32s %-5s %-12s %-8s %-10s %-10s %-6s  %s",
-                   "Title","CCY","Date","Time","Forecast","Previous","BIAS","URL"),
+                   "Title","CCY","Date","Time","Forecast","Previous","BIAS","Event URL"),
       x, y, InpColorInfo, 7);
    y += lineH;
 
@@ -272,7 +316,7 @@ void DrawDashboard()
          StringSubstr(evTitle[i], 0, 31),
          evCountry[i], dt, tm,
          evForecast[i], evPrevious[i],
-         bias, CAL_URL);
+         bias, evURL[i]);
 
       LabelSet("ev" + (string)i, line, x, y, c, 7);
       y += lineH;
