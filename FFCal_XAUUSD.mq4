@@ -27,7 +27,7 @@ input color    InpColorInfo     = clrWhite;
 #define LBL_PREFIX  "FFCal_"
 #define CAL_URL     "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
-//--- Event data store (parallel arrays — MQL4 has no struct arrays)
+//--- Event data store (parallel arrays)
 string   evTitle    [MAX_EVENTS];
 string   evCountry  [MAX_EVENTS];
 datetime evTime     [MAX_EVENTS];
@@ -39,7 +39,7 @@ bool     evTraded   [MAX_EVENTS];
 int      evCount    = 0;
 
 datetime g_lastFetch = 0;
-string   g_lblPrefix = "";        // built once in OnInit, avoids repeated string concat
+string   g_lblPrefix = "";
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -100,8 +100,12 @@ void FetchAndParseCalendar()
       return;
    }
 
-   g_lastFetch = TimeCurrent();
-   ParseJSON(CharArrayToString(result));
+   //--- FIX: assign CharArrayToString result to a named variable
+   //    before passing into ParseJSON(const string &json)
+   //    MQL4 strict does not allow temporaries as const-ref arguments
+   string json = CharArrayToString(result);
+   g_lastFetch  = TimeCurrent();
+   ParseJSON(json);
    Print("FFCal | Loaded ", evCount, " Medium/High events.");
 }
 
@@ -131,10 +135,15 @@ void ParseJSON(const string &json)
       evTitle    [evCount] = ExtractField(obj, "title");
       evForecast [evCount] = ExtractField(obj, "forecast");
       evPrevious [evCount] = ExtractField(obj, "previous");
-      evTime     [evCount] = ParseFFDate(ExtractField(obj, "date"));
-      evBias     [evCount] = CalcBias(country, evTitle[evCount],
-                                      evForecast[evCount], evPrevious[evCount]);
-      evTraded   [evCount] = false;
+
+      //--- FIX: assign ExtractField result to a named variable
+      //    before passing into ParseFFDate(const string &raw)
+      string dateStr      = ExtractField(obj, "date");
+      evTime [evCount]    = ParseFFDate(dateStr);
+
+      evBias   [evCount] = CalcBias(country, evTitle[evCount],
+                                    evForecast[evCount], evPrevious[evCount]);
+      evTraded [evCount] = false;
       evCount++;
    }
 }
@@ -168,7 +177,6 @@ datetime ParseFFDate(const string &raw)
    mdt.min  = (int)StringSubstr(raw, 14, 2);
    mdt.sec  = (int)StringSubstr(raw, 17, 2);
 
-   // Parse UTC offset  e.g. "-05:00" or "+00:00"
    int    offSign = 1;
    int    offH    = 0;
    int    offM    = 0;
@@ -189,7 +197,7 @@ datetime ParseFFDate(const string &raw)
 
 //+------------------------------------------------------------------+
 //| Gold directional bias from Forecast vs Previous gap              |
-//| +1 = Bullish Gold (BUY)  |  -1 = Bearish Gold (SELL)  |  0 = No trade |
+//| +1 = Bullish Gold (BUY) | -1 = Bearish Gold (SELL) | 0 = Skip   |
 //+------------------------------------------------------------------+
 int CalcBias(const string country,
              const string title,
@@ -202,12 +210,11 @@ int CalcBias(const string country,
    double pv = StringToDouble(previous);
    if (fc == 0.0 && pv == 0.0) return 0;
 
-   int stronger = (fc > pv) ? -1 : (fc < pv) ?  1 : 0; // stronger USD = bear gold
-   int weaker   = (fc < pv) ? -1 : (fc > pv) ?  1 : 0; // (unused directly)
+   // stronger USD data = bearish gold (-1); weaker = bullish (+1)
+   int stronger = (fc > pv) ? -1 : (fc < pv) ? 1 : 0;
 
    if (country == "USD")
    {
-      // Growth / Labour / Activity: stronger data -> USD up -> gold down
       if (StringFind(title, "Employment")  >= 0 ||
           StringFind(title, "Claims")      >= 0 ||
           StringFind(title, "PMI")         >= 0 ||
@@ -216,18 +223,15 @@ int CalcBias(const string country,
           StringFind(title, "Home Sales")  >= 0)
          return stronger;
 
-      // Inflation: higher CPI/PCE -> hawkish Fed -> gold down
       if (StringFind(title, "CPI")       >= 0 ||
           StringFind(title, "PCE")       >= 0 ||
           StringFind(title, "Inflation") >= 0)
          return stronger;
 
-      // Unemployment Rate: higher = weaker labour -> gold up
       if (StringFind(title, "Unemployment Rate") >= 0)
-         return -stronger; // reverse polarity
+         return -stronger;
    }
 
-   // China PMI: weaker China = risk-off = modest gold support
    if (country == "CNY" && StringFind(title, "PMI") >= 0)
       return -stronger;
 
@@ -261,15 +265,14 @@ void DrawDashboard()
       string bias = (evBias[i] ==  1) ? "BULL" :
                     (evBias[i] == -1) ? "BEAR" : "NEUT";
 
+      string dt = TimeToString(evTime[i], TIME_DATE);
+      string tm = TimeToString(evTime[i], TIME_MINUTES);
+
       string line = StringFormat("%-32s %-5s %-12s %-8s %-10s %-10s %-6s  %s",
          StringSubstr(evTitle[i], 0, 31),
-         evCountry[i],
-         TimeToString(evTime[i], TIME_DATE),
-         TimeToString(evTime[i], TIME_MINUTES),
-         evForecast[i],
-         evPrevious[i],
-         bias,
-         CAL_URL);
+         evCountry[i], dt, tm,
+         evForecast[i], evPrevious[i],
+         bias, CAL_URL);
 
       LabelSet("ev" + (string)i, line, x, y, c, 7);
       y += lineH;
@@ -282,11 +285,11 @@ void DrawDashboard()
 }
 
 //+------------------------------------------------------------------+
-//| Create or update a single OBJ_LABEL                             |
+//| Create or update a single OBJ_LABEL                              |
 //+------------------------------------------------------------------+
-void LabelSet(const string id,   const string text,
-              const int x,       const int y,
-              const color clr,   const int sz)
+void LabelSet(const string id,  const string text,
+              const int x,      const int y,
+              const color clr,  const int sz)
 {
    string nm = g_lblPrefix + id;
    if (ObjectFind(0, nm) < 0)
@@ -304,14 +307,10 @@ void LabelSet(const string id,   const string text,
 }
 
 //+------------------------------------------------------------------+
-//| Delete all dashboard labels by prefix                            |
-//| FIX: ObjectsTotal(chart,window,type) — explicit 3-arg form      |
-//|      avoids "ambiguous call to overloaded function" in strict    |
+//| Delete all dashboard labels matched by prefix                    |
 //+------------------------------------------------------------------+
 void RemoveAllLabels()
 {
-   //--- Use ObjectsTotal(chart_id, sub_window, object_type)
-   //    chart_id=0 (current), sub_window=-1 (all), type=OBJ_LABEL
    int total = ObjectsTotal(0, -1, OBJ_LABEL);
    for (int i = total - 1; i >= 0; i--)
    {
@@ -322,11 +321,10 @@ void RemoveAllLabels()
 }
 
 //+------------------------------------------------------------------+
-//| Check upcoming/past events and manage XAU/USD orders            |
+//| Check upcoming/past events and manage XAU/USD orders             |
 //+------------------------------------------------------------------+
 void CheckAndTrade()
 {
-   // Guard: only run on gold symbols
    string sym = Symbol();
    if (sym != "XAUUSD"  && sym != "XAUUSDm" &&
        sym != "GOLD"    && sym != "GOLDm") return;
@@ -339,7 +337,6 @@ void CheckAndTrade()
 
       int secs = (int)(evTime[i] - now);
 
-      // Pre-event window: open order
       if (secs > 0 && secs <= InpMinsBefore * 60)
       {
          if (!HasOpenOrder())
@@ -349,7 +346,6 @@ void CheckAndTrade()
          }
       }
 
-      // Post-event timeout: force-close
       if (secs < -(InpMinsAfter * 60))
       {
          CloseAllOrders();
